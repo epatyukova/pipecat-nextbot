@@ -1,6 +1,6 @@
 # Restaurant receptionist: agent architecture
 
-**Status:** proposed; the agent is not scaffolded. The [restaurant receptionist specification](../specs/restaurant-receptionist.md) defines product behaviour and acceptance criteria. This document describes how the first, single-location release could implement it. It does not select providers or approve deployment.
+**Status:** proposed restaurant architecture. A generic local cascade scaffold exists in [`server/`](../../server/) with Deepgram, OpenAI, Cartesia, SmallWebRTC, and evals. The [restaurant receptionist specification](../specs/restaurant-receptionist.md) defines the intended product behaviour and acceptance criteria. Production telephony, integrations, and deployment remain undecided.
 
 ## Call path and boundaries
 

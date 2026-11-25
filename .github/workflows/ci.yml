@@ -28,7 +28,9 @@ jobs:
           python-version-file: .python-version
 
       - name: Install dependencies
-        run: uv sync --locked --all-groups
+        run: |
+          uv sync --locked --all-groups
+          uv sync --locked --project server
 
       - name: Lint
         run: uv run ruff check .
@@ -42,14 +44,16 @@ jobs:
           files=()
           while IFS= read -r -d '' file; do
             files+=("$file")
-          done < <(find . -type f -name '*.py' -not -path './.venv/*' -print0)
-          # mypy skips directories whose names start with a dot, so pass the
-          # files explicitly. The project Python lives under .agents/.
+          done < <(find . \( -name .venv -o -path ./server \) -prune -o -type f -name '*.py' -print0)
+          # Pass these files explicitly because mypy skips hidden directories.
           if [ ${#files[@]} -eq 0 ]; then
             echo 'No Python source exists yet; skipping mypy.'
           else
             uv run mypy "${files[@]}"
           fi
+
+      - name: Type check bot
+        run: uv run --locked mypy --python-executable server/.venv/bin/python server
 
       - name: Test
         shell: bash

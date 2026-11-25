@@ -2,7 +2,7 @@
 
 A planned phone receptionist for a small restaurant. It will answer calls during service and after hours, answer questions from approved restaurant information, book tables using the same reservation system as staff, and offer optional booking confirmations. Allergy safety questions, large parties, private events, and booking changes or cancellations go to staff or the configured fallback.
 
-**Project status:** specification, proposed architecture, and development tooling are in place. The Pipecat bot, restaurant integrations, and conversation evals have not been scaffolded. There is no phone or browser service to start yet.
+**Project status:** a local Pipecat demo is scaffolded with Deepgram speech recognition, an OpenAI language model, and Cartesia speech synthesis. It uses the scaffold's generic assistant prompt and starter evals. Restaurant behaviour, inbound telephony, and live integrations are not implemented.
 
 ## Documentation
 
@@ -21,10 +21,27 @@ uv run --locked ruff check .
 uv run --locked ruff format --check .
 ```
 
-The root `pyproject.toml` also configures mypy and pytest. CI passes Python files outside `.venv` to mypy explicitly because recursive discovery can skip helper scripts under `.agents/`. CI runs pytest when `tests/test_*.py` files exist; there is no permanent pytest suite yet. No API credentials are needed for these development checks.
+The root `pyproject.toml` also configures mypy and pytest. CI type-checks the bot against its separate `server/` environment and runs pytest when `tests/test_*.py` files exist. No API credentials are needed for static checks.
 
-## Before building the agent
+## Run the local demo
 
-Confirm mock demo versus live pilot, telephony and staff transfer, speech and model providers, voice and accent, and hosting. For a live pilot, also confirm the reservation system, restaurant policies, and after-hours fallback. Then scaffold with the Pipecat CLI and eval support. Validate behaviour with synthetic restaurant data before enabling real bookings, messages, or transfers.
+Set `DEEPGRAM_API_KEY`, `OPENAI_API_KEY`, and `CARTESIA_API_KEY` in the repository root `.env` or export them in your shell. See [`server/.env.example`](server/.env.example) for optional model and voice overrides. Keep actual keys out of Git.
 
-Keep credentials in a local `.env` file. Do not commit secret values or put real caller data in fixtures or eval logs.
+```sh
+cd server
+uv sync --locked
+uv run --locked bot.py --host 127.0.0.1
+```
+
+Open [http://localhost:7860](http://localhost:7860) for the built-in SmallWebRTC client. To run the generated text scenario with the server still running, use a second terminal:
+
+```sh
+cd server
+uv run --locked pipecat eval run evals/starter_text.yaml -v
+```
+
+The starter scenario uses a local Ollama judge by default (`gemma4:12b`). To use a compatible model you already have, copy the scenario and set `judge.eval.service: ollama` and `judge.eval.model` to its name in the copy. Text mode does not verify the speech path. `evals/starter_audio.yaml` exercises that path and may download local speech models on first use.
+
+## Next steps
+
+Implement restaurant behaviour using synthetic data and fake integrations. Before enabling any live bookings, messages, or transfers, confirm the telephony and reservation systems, staff fallback, and pilot release checks in the [agent architecture](docs/architecture/restaurant-receptionist.md). Do not put real caller data in fixtures or eval logs.
