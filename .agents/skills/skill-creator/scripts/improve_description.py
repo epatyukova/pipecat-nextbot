@@ -1,50 +1,19 @@
 #!/usr/bin/env python3
-"""Improve a skill description based on eval results.
-
-Takes eval results (from run_eval.py) and generates an improved description
-by calling `claude -p` as a subprocess (same auth pattern as run_eval.py —
-uses the session's Claude Code auth, no separate ANTHROPIC_API_KEY needed).
-"""
+"""Improve a skill description using Claude Code or Cursor Agent CLI."""
 
 import argparse
 import json
-import os
 import re
-import subprocess
 import sys
 from pathlib import Path
 
+from scripts.agent_backends import (
+    SUPPORTED_BACKENDS,
+    backend_display_name,
+    call_text_agent,
+    resolve_backend,
+)
 from scripts.utils import parse_skill_md
-
-
-def _call_claude(prompt: str, model: str | None, timeout: int = 300) -> str:
-    """Run `claude -p` with the prompt on stdin and return the text response.
-
-    Prompt goes over stdin (not argv) because it embeds the full SKILL.md
-    body and can easily exceed comfortable argv length.
-    """
-    cmd = ["claude", "-p", "--output-format", "text"]
-    if model:
-        cmd.extend(["--model", model])
-
-    # Remove CLAUDECODE env var to allow nesting claude -p inside a
-    # Claude Code session. The guard is for interactive terminal conflicts;
-    # programmatic subprocess usage is safe. Same pattern as run_eval.py.
-    env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
-
-    result = subprocess.run(
-        cmd,
-        input=prompt,
-        capture_output=True,
-        text=True,
-        env=env,
-        timeout=timeout,
-    )
-    if result.returncode != 0:
-        raise RuntimeError(
-            f"claude -p exited {result.returncode}\nstderr: {result.stderr}"
-        )
-    return result.stdout
 
 
 def improve_description(
@@ -53,12 +22,15 @@ def improve_description(
     current_description: str,
     eval_results: dict,
     history: list[dict],
-    model: str,
+    model: str | None,
+    backend: str = "auto",
     test_results: dict | None = None,
     log_dir: Path | None = None,
     iteration: int | None = None,
 ) -> str:
-    """Call Claude to improve the description based on eval results."""
+    """Call the selected agent to improve the description based on eval results."""
+    backend = resolve_backend(backend)
+    harness_name = backend_display_name(backend)
     failed_triggers = [
         r for r in eval_results["results"] if r["should_trigger"] and not r["pass"]
     ]
@@ -78,9 +50,9 @@ def improve_description(
     else:
         scores_summary = f"Train: {train_score}"
 
-    prompt = f"""You are optimizing a skill description for a Claude Code skill called "{skill_name}". A "skill" is sort of like a prompt, but with progressive disclosure -- there's a title and description that Claude sees when deciding whether to use the skill, and then if it does use the skill, it reads the .md file which has lots more details and potentially links to other resources in the skill folder like helper files and scripts and additional documentation or examples.
+    prompt = f"""You are optimizing a skill description for a {harness_name} Agent Skill called "{skill_name}". A skill uses progressive disclosure: the agent sees its name and description when deciding whether to use it, then reads SKILL.md and any linked resources only after selecting it.
 
-The description appears in Claude's "available_skills" list. When a user sends a query, Claude decides whether to invoke the skill based solely on the title and on this description. Your goal is to write a description that triggers for relevant queries, and doesn't trigger for irrelevant ones.
+The description appears in the agent's available-skills list. When a user sends a query, the agent decides whether to load the skill based on its name and this description. Your goal is to write a description that triggers for relevant queries and does not trigger for irrelevant ones.
 
 Here's the current description:
 <current_description>
@@ -144,14 +116,14 @@ Concretely, your description should not be more than about 100-200 words, even i
 Here are some tips that we've found to work well in writing these descriptions:
 - The skill should be phrased in the imperative -- "Use this skill for" rather than "this skill does"
 - The skill description should focus on the user's intent, what they are trying to achieve, vs. the implementation details of how the skill works.
-- The description competes with other skills for Claude's attention — make it distinctive and immediately recognizable.
+- The description competes with other skills for the agent's attention — make it distinctive and immediately recognizable.
 - If you're getting lots of failures after repeated attempts, change things up. Try different sentence structures or wordings.
 
 I'd encourage you to be creative and mix up the style in different iterations since you'll have multiple opportunities to try different approaches and we'll just grab the highest-scoring one at the end. 
 
 Please respond with only the new description text in <new_description> tags, nothing else."""
 
-    text = _call_claude(prompt, model)
+    text = call_text_agent(prompt, model, backend)
 
     match = re.search(r"<new_description>(.*?)</new_description>", text, re.DOTALL)
     description = (
@@ -169,9 +141,8 @@ Please respond with only the new description text in <new_description> tags, not
 
     # Safety net: the prompt already states the 1024-char hard limit, but if
     # the model blew past it anyway, make one fresh single-turn call that
-    # quotes the too-long version and asks for a shorter rewrite. (The old
-    # SDK path did this as a true multi-turn; `claude -p` is one-shot, so we
-    # inline the prior output into the new prompt instead.)
+    # quotes the too-long version and asks for a shorter rewrite.
+    # Keep this as a fresh one-shot call so both supported CLIs behave alike.
     if len(description) > 1024:
         shorten_prompt = (
             f"{prompt}\n\n"
@@ -183,7 +154,7 @@ Please respond with only the new description text in <new_description> tags, not
             f"important trigger words and intent coverage. Respond with only "
             f"the new description in <new_description> tags."
         )
-        shorten_text = _call_claude(shorten_prompt, model)
+        shorten_text = call_text_agent(shorten_prompt, model, backend)
         match = re.search(
             r"<new_description>(.*?)</new_description>", shorten_text, re.DOTALL
         )
@@ -222,7 +193,17 @@ def main():
     parser.add_argument(
         "--history", default=None, help="Path to history JSON (previous attempts)"
     )
-    parser.add_argument("--model", required=True, help="Model for improvement")
+    parser.add_argument(
+        "--model",
+        default=None,
+        help="Model for improvement (default: selected CLI's configured model)",
+    )
+    parser.add_argument(
+        "--backend",
+        choices=SUPPORTED_BACKENDS,
+        default="auto",
+        help="Agent CLI used for improvement (default: auto)",
+    )
     parser.add_argument(
         "--verbose", action="store_true", help="Print thinking to stderr"
     )
@@ -255,6 +236,7 @@ def main():
         eval_results=eval_results,
         history=history,
         model=args.model,
+        backend=args.backend,
     )
 
     if args.verbose:

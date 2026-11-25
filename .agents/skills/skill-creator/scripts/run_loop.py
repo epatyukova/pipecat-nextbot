@@ -15,6 +15,7 @@ import time
 import webbrowser
 from pathlib import Path
 
+from scripts.agent_backends import SUPPORTED_BACKENDS, resolve_backend
 from scripts.generate_report import generate_html
 from scripts.improve_description import improve_description
 from scripts.run_eval import find_project_root, run_eval
@@ -61,13 +62,15 @@ def run_loop(
     runs_per_query: int,
     trigger_threshold: float,
     holdout: float,
-    model: str,
+    model: str | None,
     verbose: bool,
+    backend: str = "auto",
     live_report_path: Path | None = None,
     log_dir: Path | None = None,
 ) -> dict:
     """Run the eval + improvement loop."""
-    project_root = find_project_root()
+    backend = resolve_backend(backend)
+    project_root = find_project_root(backend)
     name, original_description, content = parse_skill_md(skill_path)
     current_description = description_override or original_description
 
@@ -106,6 +109,7 @@ def run_loop(
             runs_per_query=runs_per_query,
             trigger_threshold=trigger_threshold,
             model=model,
+            backend=backend,
         )
         eval_elapsed = time.time() - t0
 
@@ -238,6 +242,7 @@ def run_loop(
             eval_results=train_results,
             history=blinded_history,
             model=model,
+            backend=backend,
             log_dir=log_dir,
             iteration=iteration,
         )
@@ -270,6 +275,7 @@ def run_loop(
 
     return {
         "exit_reason": exit_reason,
+        "backend": backend,
         "original_description": original_description,
         "best_description": best["description"],
         "best_score": best_score,
@@ -314,7 +320,17 @@ def main():
         default=0.4,
         help="Fraction of eval set to hold out for testing (0 to disable)",
     )
-    parser.add_argument("--model", required=True, help="Model for improvement")
+    parser.add_argument(
+        "--model",
+        default=None,
+        help="Model to use (default: selected CLI's configured model)",
+    )
+    parser.add_argument(
+        "--backend",
+        choices=SUPPORTED_BACKENDS,
+        default="auto",
+        help="Agent CLI used for evaluation and improvement (default: auto)",
+    )
     parser.add_argument(
         "--verbose", action="store_true", help="Print progress to stderr"
     )
@@ -378,6 +394,7 @@ def main():
         trigger_threshold=args.trigger_threshold,
         holdout=args.holdout,
         model=args.model,
+        backend=args.backend,
         verbose=args.verbose,
         live_report_path=live_report_path,
         log_dir=log_dir,
