@@ -46,6 +46,11 @@ def split_eval_set(
     return train_set, test_set
 
 
+def history_int(entry: dict[str, object], key: str) -> int:
+    value = entry.get(key)
+    return value if isinstance(value, int) else 0
+
+
 def run_loop(
     eval_set: list[dict],
     skill_path: Path,
@@ -199,7 +204,7 @@ def run_loop(
                     )
 
             print_eval_stats("Train", train_results["results"], eval_elapsed)
-            if test_summary:
+            if test_results is not None:
                 print_eval_stats("Test ", test_results["results"], 0)
 
         if train_summary["failed"] == 0:
@@ -247,11 +252,15 @@ def run_loop(
 
     # Find the best iteration by TEST score (or train if no test set)
     if test_set:
-        best = max(history, key=lambda h: h["test_passed"] or 0)
-        best_score = f"{best['test_passed']}/{best['test_total']}"
+        best = max(history, key=lambda h: history_int(h, "test_passed"))
+        best_score = (
+            f"{history_int(best, 'test_passed')}/{history_int(best, 'test_total')}"
+        )
     else:
-        best = max(history, key=lambda h: h["train_passed"])
-        best_score = f"{best['train_passed']}/{best['train_total']}"
+        best = max(history, key=lambda h: history_int(h, "train_passed"))
+        best_score = (
+            f"{history_int(best, 'train_passed')}/{history_int(best, 'train_total')}"
+        )
 
     if verbose:
         print(f"\nExit reason: {exit_reason}", file=sys.stderr)
