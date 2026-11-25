@@ -18,7 +18,6 @@ import uuid
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
-from scripts.utils import parse_skill_md
 from scripts.agent_backends import (
     SUPPORTED_BACKENDS,
     build_stream_command,
@@ -27,6 +26,7 @@ from scripts.agent_backends import (
     resolve_backend,
     stream_subprocess_env,
 )
+from scripts.utils import parse_skill_md
 
 
 def find_project_root(backend: str = "auto") -> Path:
@@ -47,7 +47,7 @@ def find_project_root(backend: str = "auto") -> Path:
 def _candidate_name(skill_name: str) -> str:
     unique_id = uuid.uuid4().hex[:8]
     suffix = f"-eval-{unique_id}"
-    return f"{skill_name[:64 - len(suffix)].rstrip('-')}{suffix}"
+    return f"{skill_name[: 64 - len(suffix)].rstrip('-')}{suffix}"
 
 
 def _candidate_content(
@@ -165,9 +165,7 @@ def run_single_query(
         if owns_candidate:
             candidate_dir.mkdir(parents=True, exist_ok=True)
             candidate_file.write_text(
-                _candidate_content(
-                    clean_name, skill_name, skill_description, backend
-                )
+                _candidate_content(clean_name, skill_name, skill_description, backend)
             )
         elif not candidate_file.exists():
             raise RuntimeError(f"Shared candidate skill is missing: {candidate_file}")
@@ -184,7 +182,7 @@ def run_single_query(
 
         if backend == "cursor":
             try:
-                stdout, stderr = process.communicate(timeout=timeout)
+                stdout_bytes, stderr_bytes = process.communicate(timeout=timeout)
             except subprocess.TimeoutExpired as exc:
                 process.kill()
                 process.communicate()
@@ -192,12 +190,12 @@ def run_single_query(
                     f"cursor trigger-evaluation process timed out after {timeout}s"
                 ) from exc
             if process.returncode != 0:
-                detail = stderr.decode("utf-8", errors="replace").strip()
+                detail = stderr_bytes.decode("utf-8", errors="replace").strip()
                 raise RuntimeError(
                     f"cursor trigger-evaluation process exited {process.returncode}: "
                     f"{detail or 'no diagnostic output'}"
                 )
-            output = stdout.decode("utf-8", errors="replace")
+            output = stdout_bytes.decode("utf-8", errors="replace")
             for line in output.splitlines():
                 try:
                     event = json.loads(line)
@@ -214,19 +212,23 @@ def run_single_query(
         pending_tool_name = None
         accumulated_json = ""
 
+        stdout = process.stdout
+        if stdout is None:
+            raise RuntimeError("stdout pipe was not created")
+
         try:
             while time.time() - start_time < timeout:
                 if process.poll() is not None:
-                    remaining = process.stdout.read()
+                    remaining = stdout.read()
                     if remaining:
                         buffer += remaining.decode("utf-8", errors="replace")
                     break
 
-                ready, _, _ = select.select([process.stdout], [], [], 1.0)
+                ready, _, _ = select.select([stdout], [], [], 1.0)
                 if not ready:
                     continue
 
-                chunk = os.read(process.stdout.fileno(), 8192)
+                chunk = os.read(stdout.fileno(), 8192)
                 if not chunk:
                     break
                 buffer += chunk.decode("utf-8", errors="replace")
@@ -278,9 +280,13 @@ def run_single_query(
                                 continue
                             tool_name = content_item.get("name", "")
                             tool_input = content_item.get("input", {})
-                            if tool_name == "Skill" and clean_name in tool_input.get("skill", ""):
+                            if tool_name == "Skill" and clean_name in tool_input.get(
+                                "skill", ""
+                            ):
                                 triggered = True
-                            elif tool_name == "Read" and clean_name in tool_input.get("file_path", ""):
+                            elif tool_name == "Read" and clean_name in tool_input.get(
+                                "file_path", ""
+                            ):
                                 triggered = True
                             return triggered
 
@@ -374,9 +380,7 @@ def run_eval(
         # workspace prevents UUID races and keeps the user's project untouched.
         with tempfile.TemporaryDirectory(prefix="skill-trigger-eval-") as temp_dir:
             workspace = Path(temp_dir)
-            _mirror_cursor_discovery_context(
-                project_root, workspace, skill_name
-            )
+            _mirror_cursor_discovery_context(project_root, workspace, skill_name)
             shared_candidate_name = _candidate_name(skill_name)
             _write_cursor_candidate(
                 workspace, shared_candidate_name, skill_name, description
@@ -385,9 +389,7 @@ def run_eval(
                 workspace, shared_candidate_name
             )
     else:
-        query_triggers, query_items, failed_runs = execute_batch(
-            project_root, None
-        )
+        query_triggers, query_items, failed_runs = execute_batch(project_root, None)
 
     if failed_runs:
         raise RuntimeError(
@@ -400,19 +402,20 @@ def run_eval(
         item = query_items[query]
         trigger_rate = sum(triggers) / len(triggers)
         should_trigger = item["should_trigger"]
-        did_pass = (
-            trigger_rate >= trigger_threshold
-            if should_trigger
-            else trigger_rate < trigger_threshold
+        if should_trigger:
+            did_pass = trigger_rate >= trigger_threshold
+        else:
+            did_pass = trigger_rate < trigger_threshold
+        results.append(
+            {
+                "query": query,
+                "should_trigger": should_trigger,
+                "trigger_rate": trigger_rate,
+                "triggers": sum(triggers),
+                "runs": len(triggers),
+                "pass": did_pass,
+            }
         )
-        results.append({
-            "query": query,
-            "should_trigger": should_trigger,
-            "trigger_rate": trigger_rate,
-            "triggers": sum(triggers),
-            "runs": len(triggers),
-            "pass": did_pass,
-        })
 
     passed = sum(1 for r in results if r["pass"])
     total = len(results)
@@ -431,22 +434,40 @@ def run_eval(
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Run trigger evaluation for a skill description")
+    parser = argparse.ArgumentParser(
+        description="Run trigger evaluation for a skill description"
+    )
     parser.add_argument("--eval-set", required=True, help="Path to eval set JSON file")
     parser.add_argument("--skill-path", required=True, help="Path to skill directory")
-    parser.add_argument("--description", default=None, help="Override description to test")
-    parser.add_argument("--num-workers", type=int, default=10, help="Number of parallel workers")
-    parser.add_argument("--timeout", type=int, default=30, help="Timeout per query in seconds")
-    parser.add_argument("--runs-per-query", type=int, default=3, help="Number of runs per query")
-    parser.add_argument("--trigger-threshold", type=float, default=0.5, help="Trigger rate threshold")
-    parser.add_argument("--model", default=None, help="Model to use (default: selected CLI's configured model)")
+    parser.add_argument(
+        "--description", default=None, help="Override description to test"
+    )
+    parser.add_argument(
+        "--num-workers", type=int, default=10, help="Number of parallel workers"
+    )
+    parser.add_argument(
+        "--timeout", type=int, default=30, help="Timeout per query in seconds"
+    )
+    parser.add_argument(
+        "--runs-per-query", type=int, default=3, help="Number of runs per query"
+    )
+    parser.add_argument(
+        "--trigger-threshold", type=float, default=0.5, help="Trigger rate threshold"
+    )
+    parser.add_argument(
+        "--model",
+        default=None,
+        help="Model to use (default: selected CLI's configured model)",
+    )
     parser.add_argument(
         "--backend",
         choices=SUPPORTED_BACKENDS,
         default="auto",
         help="Agent CLI used for trigger tests (default: auto)",
     )
-    parser.add_argument("--verbose", action="store_true", help="Print progress to stderr")
+    parser.add_argument(
+        "--verbose", action="store_true", help="Print progress to stderr"
+    )
     args = parser.parse_args()
 
     eval_set = json.loads(Path(args.eval_set).read_text())
@@ -479,11 +500,16 @@ def main():
 
     if args.verbose:
         summary = output["summary"]
-        print(f"Results: {summary['passed']}/{summary['total']} passed", file=sys.stderr)
+        print(
+            f"Results: {summary['passed']}/{summary['total']} passed", file=sys.stderr
+        )
         for r in output["results"]:
             status = "PASS" if r["pass"] else "FAIL"
             rate_str = f"{r['triggers']}/{r['runs']}"
-            print(f"  [{status}] rate={rate_str} expected={r['should_trigger']}: {r['query'][:70]}", file=sys.stderr)
+            print(
+                f"  [{status}] rate={rate_str} expected={r['should_trigger']}: {r['query'][:70]}",
+                file=sys.stderr,
+            )
 
     print(json.dumps(output, indent=2))
 

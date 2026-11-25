@@ -39,10 +39,16 @@ jobs:
       - name: Type check
         shell: bash
         run: |
-          if find . -type f -name '*.py' -not -path './.venv/*' -print -quit | grep -q .; then
-            uv run mypy .
-          else
+          files=()
+          while IFS= read -r -d '' file; do
+            files+=("$file")
+          done < <(find . -type f -name '*.py' -not -path './.venv/*' -print0)
+          # mypy skips directories whose names start with a dot, so pass the
+          # files explicitly. The project Python lives under .agents/.
+          if [ ${#files[@]} -eq 0 ]; then
             echo 'No Python source exists yet; skipping mypy.'
+          else
+            uv run mypy "${files[@]}"
           fi
 
       - name: Test

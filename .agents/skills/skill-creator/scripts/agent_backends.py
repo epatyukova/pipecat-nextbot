@@ -7,7 +7,6 @@ import os
 import shutil
 import subprocess
 
-
 SUPPORTED_BACKENDS = ("auto", "claude", "cursor")
 
 
@@ -165,7 +164,9 @@ def call_text_agent(
         timeout=timeout,
     )
     if result.returncode != 0:
-        detail = result.stderr.strip() or result.stdout.strip() or "no diagnostic output"
+        detail = (
+            result.stderr.strip() or result.stdout.strip() or "no diagnostic output"
+        )
         raise RuntimeError(
             f"{backend_display_name(backend)} CLI exited {result.returncode}: {detail}"
         )
@@ -198,9 +199,8 @@ def cursor_event_triggers_skill(event: dict, marker: str) -> bool:
     expected_suffix = f"/{marker}/SKILL.md"
 
     def is_candidate_path(value: object) -> bool:
-        return (
-            isinstance(value, str)
-            and value.replace("\\", "/").endswith(expected_suffix)
+        return isinstance(value, str) and value.replace("\\", "/").endswith(
+            expected_suffix
         )
 
     read_call = tool_call.get("readToolCall")
