@@ -16,6 +16,7 @@ import sys
 from collections import defaultdict
 from collections.abc import Iterable
 from pathlib import Path
+from typing import Any
 
 DEFAULT_SENSITIVE_RULES: list[tuple[str, str, float]] = [
     ("**/auth/**", "auth", 1.0),
@@ -292,12 +293,12 @@ def author_excluded(name: str, email: str, patterns: Iterable[re.Pattern[str]]) 
 
 def compute_community_owners(
     community_files: Iterable[str],
-    people: dict[str, dict[str, object]],
+    people: dict[str, dict[str, Any]],
     file_people_touches: dict[str, dict[str, int]],
     file_people_recency: dict[str, dict[str, float]],
     file_people_sensitive: dict[str, dict[str, float]],
     top_n: int,
-) -> dict[str, object]:
+) -> dict[str, Any]:
     touches_by_person: dict[str, int] = defaultdict(int)
     recency_by_person: dict[str, float] = defaultdict(float)
     sensitive_by_person: dict[str, float] = defaultdict(float)
@@ -397,7 +398,7 @@ def run_git_log(
 
 def iter_commits(
     lines: Iterable[list[str]],
-) -> Iterable[tuple[dict[str, object], list[str]]]:
+) -> Iterable[tuple[dict[str, Any], list[str]]]:
     for chunk in lines:
         if not chunk or chunk[0] != "---":
             continue
@@ -439,9 +440,9 @@ def build_ownership_map(args: argparse.Namespace) -> Path:
     rules = load_sensitive_rules(args.sensitive_config)
     out_dir = ensure_out_dir(args.out)
 
-    people: dict[str, dict[str, object]] = {}
-    files: dict[str, dict[str, object]] = {}
-    edges: dict[tuple[str, str], dict[str, object]] = {}
+    people: dict[str, dict[str, Any]] = {}
+    files: dict[str, dict[str, Any]] = {}
+    edges: dict[tuple[str, str], dict[str, Any]] = {}
     file_people_touches: dict[str, dict[str, int]] = defaultdict(
         lambda: defaultdict(int)
     )
@@ -883,7 +884,7 @@ def build_ownership_map(args: argparse.Namespace) -> Path:
             person_nodes = set()
             file_nodes = set()
             community_index: dict[str, int] = {}
-            community_metadata: list[dict[str, object]] = []
+            community_metadata: list[dict[str, Any]] = []
 
             if args.graphml or (
                 args.communities and (args.no_cochange or not cochange_rows)
@@ -900,12 +901,12 @@ def build_ownership_map(args: argparse.Namespace) -> Path:
 
             if not args.no_cochange and cochange_rows:
                 graph_cochange = nx.Graph()
-                for file_a, file_b, count, jaccard in cochange_rows:
+                for file_a, file_b, count_text, jaccard_text in cochange_rows:
                     graph_cochange.add_edge(
                         file_a,
                         file_b,
-                        weight=float(jaccard),
-                        count=int(count),
+                        weight=float(jaccard_text),
+                        count=int(count_text),
                     )
 
             if args.communities:

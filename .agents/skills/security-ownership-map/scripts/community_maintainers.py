@@ -11,9 +11,10 @@ import math
 import re
 import subprocess
 import sys
-from collections import Counter, defaultdict
+from collections import defaultdict
 from collections.abc import Iterable
 from pathlib import Path
+from typing import Any
 
 
 def parse_args() -> argparse.Namespace:
@@ -200,7 +201,7 @@ def load_people(data_dir: Path) -> dict[str, dict[str, str]]:
     return people
 
 
-def load_graph_json(data_dir: Path) -> dict[str, object] | None:
+def load_graph_json(data_dir: Path) -> dict[str, Any] | None:
     cochange_path = data_dir / "cochange.graph.json"
     ownership_path = data_dir / "ownership.graph.json"
     if cochange_path.exists():
@@ -210,7 +211,7 @@ def load_graph_json(data_dir: Path) -> dict[str, object] | None:
     return None
 
 
-def find_file_node(nodes: list[dict[str, object]], query: str) -> dict[str, object]:
+def find_file_node(nodes: list[dict[str, Any]], query: str) -> dict[str, Any]:
     exact = [node for node in nodes if node.get("id") == query]
     if exact:
         return exact[0]
@@ -265,7 +266,7 @@ def iter_commits_from_json(
     since: dt.datetime | None,
     until: dt.datetime | None,
     date_field: str,
-) -> Iterable[dict[str, object]]:
+) -> Iterable[dict[str, Any]]:
     with commits_path.open("r", encoding="utf-8") as handle:
         for line in handle:
             entry = json.loads(line)
@@ -305,7 +306,7 @@ def iter_commits_from_json(
 
 def iter_commits_from_git(
     repo: str, since: str | None, until: str | None, include_merges: bool
-) -> Iterable[dict[str, object]]:
+) -> Iterable[dict[str, Any]]:
     cmd = [
         "git",
         "-C",
@@ -349,7 +350,7 @@ def iter_commits_from_git(
         raise RuntimeError(stderr.strip() or "git log failed")
 
 
-def parse_git_block(block: list[str]) -> Iterable[dict[str, object]]:
+def parse_git_block(block: list[str]) -> Iterable[dict[str, Any]]:
     if len(block) < 8:
         return []
     commit_hash = block[0]
@@ -456,7 +457,7 @@ def main() -> int:
         return 0
 
     commit_rows.sort(key=lambda row: row[0])
-    period_counts: dict[str, Counter[str]] = defaultdict(Counter)
+    period_counts: dict[str, dict[str, float]] = defaultdict(lambda: defaultdict(float))
     period_totals: dict[str, float] = defaultdict(float)
 
     min_date = commit_rows[0][0]
@@ -528,10 +529,10 @@ def main() -> int:
             period_counts[period].items(), key=lambda item: item[1], reverse=True
         )
         rank = 0
-        for person_id, touches in ranked:
-            if touches < args.min_touches:
+        for person_id, period_touches in ranked:
+            if period_touches < args.min_touches:
                 continue
-            share = touches / total if total else 0.0
+            share = period_touches / total if total else 0.0
             if share < args.min_share:
                 continue
             rank += 1
@@ -539,9 +540,9 @@ def main() -> int:
                 break
             person = people.get(person_id, {})
             if args.weight == "recency":
-                touches_value = f"{touches:.4f}"
+                touches_value = f"{period_touches:.4f}"
             else:
-                touches_value = f"{touches:.0f}"
+                touches_value = f"{period_touches:.0f}"
             writer.writerow(
                 [
                     period,

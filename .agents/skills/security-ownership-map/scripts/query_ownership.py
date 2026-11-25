@@ -10,6 +10,7 @@ import sys
 from collections import defaultdict
 from collections.abc import Iterable
 from pathlib import Path
+from typing import Any
 
 
 def parse_args() -> argparse.Namespace:
@@ -97,11 +98,11 @@ def read_csv(path: Path) -> Iterable[dict[str, str]]:
         yield from reader
 
 
-def load_people(data_dir: Path) -> list[dict[str, object]]:
+def load_people(data_dir: Path) -> list[dict[str, Any]]:
     people_path = data_dir / "people.csv"
     people = []
     for row in read_csv(people_path):
-        person = dict(row)
+        person: dict[str, Any] = dict(row)
         person["touches"] = to_int(row.get("touches", "0"))
         person["commit_count"] = to_int(row.get("commit_count", "0"))
         person["sensitive_touches"] = to_float(row.get("sensitive_touches", "0"))
@@ -109,11 +110,11 @@ def load_people(data_dir: Path) -> list[dict[str, object]]:
     return people
 
 
-def load_files(data_dir: Path) -> list[dict[str, object]]:
+def load_files(data_dir: Path) -> list[dict[str, Any]]:
     files_path = data_dir / "files.csv"
     files = []
     for row in read_csv(files_path):
-        file_entry = dict(row)
+        file_entry: dict[str, Any] = dict(row)
         file_entry["touches"] = to_int(row.get("touches", "0"))
         file_entry["commit_count"] = to_int(row.get("commit_count", "0"))
         file_entry["bus_factor"] = to_int(row.get("bus_factor", "0"))
@@ -124,13 +125,13 @@ def load_files(data_dir: Path) -> list[dict[str, object]]:
     return files
 
 
-def load_summary(data_dir: Path) -> dict[str, object]:
+def load_summary(data_dir: Path) -> dict[str, Any]:
     summary_path = data_dir / "summary.json"
     with summary_path.open("r", encoding="utf-8") as handle:
         return json.load(handle)
 
 
-def load_communities(data_dir: Path) -> list[dict[str, object]]:
+def load_communities(data_dir: Path) -> list[dict[str, Any]]:
     communities_path = data_dir / "communities.json"
     if not communities_path.exists():
         raise FileNotFoundError(
@@ -140,7 +141,7 @@ def load_communities(data_dir: Path) -> list[dict[str, object]]:
         return json.load(handle)
 
 
-def load_cochange_edges(data_dir: Path) -> Iterable[dict[str, object]]:
+def load_cochange_edges(data_dir: Path) -> Iterable[dict[str, Any]]:
     edges_path = data_dir / "cochange_edges.csv"
     if not edges_path.exists():
         raise FileNotFoundError(
@@ -156,8 +157,8 @@ def load_cochange_edges(data_dir: Path) -> Iterable[dict[str, object]]:
 
 
 def select_single(
-    records: list[dict[str, object]], key: str, query: str
-) -> dict[str, object]:
+    records: list[dict[str, Any]], key: str, query: str
+) -> dict[str, Any]:
     exact = [record for record in records if str(record.get(key, "")) == query]
     if exact:
         return exact[0]
@@ -170,7 +171,7 @@ def select_single(
     raise ValueError(f"Multiple matches for {query}: {', '.join(candidates)}")
 
 
-def top_edges_for_person(data_dir: Path, person_id: str) -> list[dict[str, object]]:
+def top_edges_for_person(data_dir: Path, person_id: str) -> list[dict[str, Any]]:
     edges_path = data_dir / "edges.csv"
     results = []
     for row in read_csv(edges_path):
@@ -188,7 +189,7 @@ def top_edges_for_person(data_dir: Path, person_id: str) -> list[dict[str, objec
     return results
 
 
-def top_edges_for_file(data_dir: Path, file_id: str) -> list[dict[str, object]]:
+def top_edges_for_file(data_dir: Path, file_id: str) -> list[dict[str, Any]]:
     edges_path = data_dir / "edges.csv"
     results = []
     for row in read_csv(edges_path):
@@ -206,7 +207,7 @@ def top_edges_for_file(data_dir: Path, file_id: str) -> list[dict[str, object]]:
     return results
 
 
-def sort_records(records: list[dict[str, object]], key: str) -> list[dict[str, object]]:
+def sort_records(records: list[dict[str, Any]], key: str) -> list[dict[str, Any]]:
     return sorted(records, key=lambda item: item.get(key, 0), reverse=True)
 
 
@@ -373,12 +374,15 @@ def handle_tag(args: argparse.Namespace, data_dir: Path) -> None:
     tagged_files = [f for f in files if args.tag in f.get("sensitivity_tags", [])]
     tagged_ids = {f["file_id"] for f in tagged_files}
 
-    person_touch = defaultdict(int)
+    person_touch: dict[str, int] = defaultdict(int)
     edges_path = data_dir / "edges.csv"
     for row in read_csv(edges_path):
         if row.get("file_id") not in tagged_ids:
             continue
-        person_touch[row.get("person_id")] += to_int(row.get("touches", "0"))
+        person_id = row.get("person_id")
+        if not person_id:
+            continue
+        person_touch[person_id] += to_int(row.get("touches", "0"))
 
     people = load_people(data_dir)
     people_map = {p["person_id"]: p for p in people}
@@ -391,9 +395,7 @@ def handle_tag(args: argparse.Namespace, data_dir: Path) -> None:
         }
         for person_id, touches in person_touch.items()
     ]
-    top_people = sorted(
-        top_people, key=lambda item: item.get("touches", 0), reverse=True
-    )[: args.limit]
+    top_people = sort_records(top_people, "touches")[: args.limit]
 
     top_files = sorted(
         tagged_files, key=lambda item: item.get("touches", 0), reverse=True
@@ -428,6 +430,7 @@ def handle_summary(args: argparse.Namespace, data_dir: Path) -> None:
 
 def handle_communities(args: argparse.Namespace, data_dir: Path) -> None:
     communities = load_communities(data_dir)
+    payload: Any
     if args.id is not None:
         matches = [entry for entry in communities if entry.get("id") == args.id]
         if not matches:
