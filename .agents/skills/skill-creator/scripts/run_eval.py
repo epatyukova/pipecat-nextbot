@@ -1,35 +1,133 @@
 #!/usr/bin/env python3
 """Run trigger evaluation for a skill description.
 
-Tests whether a skill's description causes Claude to trigger (read the skill)
-for a set of queries. Outputs results as JSON.
+Tests whether Claude Code or Cursor reads a temporary skill for a set of
+queries. Outputs results as JSON.
 """
 
 import argparse
 import json
 import os
 import select
+import shutil
 import subprocess
 import sys
+import tempfile
 import time
 import uuid
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
 from scripts.utils import parse_skill_md
+from scripts.agent_backends import (
+    SUPPORTED_BACKENDS,
+    build_stream_command,
+    cursor_event_triggers_skill,
+    ensure_backend_ready,
+    resolve_backend,
+    stream_subprocess_env,
+)
 
 
-def find_project_root() -> Path:
-    """Find the project root by walking up from cwd looking for .claude/.
-
-    Mimics how Claude Code discovers its project root, so the command file
-    we create ends up where claude -p will look for it.
-    """
+def find_project_root(backend: str = "auto") -> Path:
+    """Find the nearest root from which the selected harness discovers skills."""
+    backend = resolve_backend(backend)
     current = Path.cwd()
     for parent in [current, *current.parents]:
-        if (parent / ".claude").is_dir():
+        harness_dir = ".cursor" if backend == "cursor" else ".claude"
+        if (
+            (parent / harness_dir).is_dir()
+            or (parent / ".agents").is_dir()
+            or (parent / ".git").exists()
+        ):
             return parent
     return current
+
+
+def _candidate_name(skill_name: str) -> str:
+    unique_id = uuid.uuid4().hex[:8]
+    suffix = f"-eval-{unique_id}"
+    return f"{skill_name[:64 - len(suffix)].rstrip('-')}{suffix}"
+
+
+def _candidate_content(
+    clean_name: str,
+    skill_name: str,
+    skill_description: str,
+    backend: str,
+) -> str:
+    indented_desc = "\n  ".join(skill_description.split("\n"))
+    name_line = f"name: {clean_name}\n" if backend == "cursor" else ""
+    return (
+        f"---\n"
+        f"{name_line}"
+        f"description: |\n"
+        f"  {indented_desc}\n"
+        f"---\n\n"
+        f"# {skill_name}\n\n"
+        f"This skill handles: {skill_description}\n"
+    )
+
+
+def _write_cursor_candidate(
+    project_root: Path,
+    clean_name: str,
+    skill_name: str,
+    skill_description: str,
+) -> Path:
+    candidate_file = project_root / ".cursor" / "skills" / clean_name / "SKILL.md"
+    candidate_file.parent.mkdir(parents=True, exist_ok=True)
+    candidate_file.write_text(
+        _candidate_content(clean_name, skill_name, skill_description, "cursor")
+    )
+    return candidate_file
+
+
+def _mirror_cursor_discovery_context(
+    project_root: Path,
+    workspace: Path,
+    optimized_skill_name: str,
+) -> None:
+    """Mirror routing context while excluding the skill being optimized."""
+    for filename in ("AGENTS.md", "CLAUDE.md"):
+        source = project_root / filename
+        if source.is_file():
+            shutil.copy2(source, workspace / filename)
+
+    discovery_paths = (
+        Path(".cursor/rules"),
+        Path(".cursor/skills"),
+        Path(".agents/skills"),
+        Path(".claude/skills"),
+        Path(".codex/skills"),
+    )
+    for relative in discovery_paths:
+        source = project_root / relative
+        if source.is_dir():
+            shutil.copytree(
+                source,
+                workspace / relative,
+                dirs_exist_ok=True,
+                symlinks=True,
+            )
+
+    # Remove every project copy of the skill under test. Other skills and
+    # routing rules remain available, so selection pressure resembles the real
+    # project without letting the installed description mask the candidate.
+    for skills_root in (
+        workspace / ".cursor" / "skills",
+        workspace / ".agents" / "skills",
+        workspace / ".claude" / "skills",
+        workspace / ".codex" / "skills",
+    ):
+        if not skills_root.is_dir():
+            continue
+        for skill_md in list(skills_root.rglob("SKILL.md")):
+            if skill_md.parent.name == optimized_skill_name:
+                if skill_md.parent.is_symlink():
+                    skill_md.parent.unlink()
+                else:
+                    shutil.rmtree(skill_md.parent)
 
 
 def run_single_query(
@@ -39,56 +137,75 @@ def run_single_query(
     timeout: int,
     project_root: str,
     model: str | None = None,
+    backend: str = "auto",
+    candidate_name: str | None = None,
 ) -> bool:
     """Run a single query and return whether the skill was triggered.
 
-    Creates a command file in .claude/commands/ so it appears in Claude's
-    available_skills list, then runs `claude -p` with the raw query.
-    Uses --include-partial-messages to detect triggering early from
-    stream events (content_block_start) rather than waiting for the
-    full assistant message, which only arrives after tool execution.
+    Claude uses a temporary command, preserving the original implementation.
+    Cursor uses a temporary real skill under .cursor/skills and detects its
+    documented stream-json read/tool event. Candidate names are unique so
+    concurrent evaluation batches cannot collide.
     """
-    unique_id = uuid.uuid4().hex[:8]
-    clean_name = f"{skill_name}-skill-{unique_id}"
-    project_commands_dir = Path(project_root) / ".claude" / "commands"
-    command_file = project_commands_dir / f"{clean_name}.md"
+    backend = resolve_backend(backend)
+    clean_name = candidate_name or _candidate_name(skill_name)
+    project_root_path = Path(project_root)
+    owns_candidate = candidate_name is None
+    cursor_dir_existed = (project_root_path / ".cursor").exists()
+    skills_dir_existed = (project_root_path / ".cursor" / "skills").exists()
+
+    if backend == "cursor":
+        candidate_dir = project_root_path / ".cursor" / "skills" / clean_name
+        candidate_file = candidate_dir / "SKILL.md"
+    else:
+        candidate_dir = project_root_path / ".claude" / "commands"
+        candidate_file = candidate_dir / f"{clean_name}.md"
 
     try:
-        project_commands_dir.mkdir(parents=True, exist_ok=True)
-        # Use YAML block scalar to avoid breaking on quotes in description
-        indented_desc = "\n  ".join(skill_description.split("\n"))
-        command_content = (
-            f"---\n"
-            f"description: |\n"
-            f"  {indented_desc}\n"
-            f"---\n\n"
-            f"# {skill_name}\n\n"
-            f"This skill handles: {skill_description}\n"
-        )
-        command_file.write_text(command_content)
+        if owns_candidate:
+            candidate_dir.mkdir(parents=True, exist_ok=True)
+            candidate_file.write_text(
+                _candidate_content(
+                    clean_name, skill_name, skill_description, backend
+                )
+            )
+        elif not candidate_file.exists():
+            raise RuntimeError(f"Shared candidate skill is missing: {candidate_file}")
 
-        cmd = [
-            "claude",
-            "-p", query,
-            "--output-format", "stream-json",
-            "--verbose",
-            "--include-partial-messages",
-        ]
-        if model:
-            cmd.extend(["--model", model])
-
-        # Remove CLAUDECODE env var to allow nesting claude -p inside a
-        # Claude Code session. The guard is for interactive terminal conflicts;
-        # programmatic subprocess usage is safe.
-        env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
+        cmd = build_stream_command(backend, query, model)
 
         process = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
+            stderr=(subprocess.PIPE if backend == "cursor" else subprocess.DEVNULL),
             cwd=project_root,
-            env=env,
+            env=stream_subprocess_env(backend),
         )
+
+        if backend == "cursor":
+            try:
+                stdout, stderr = process.communicate(timeout=timeout)
+            except subprocess.TimeoutExpired as exc:
+                process.kill()
+                process.communicate()
+                raise RuntimeError(
+                    f"cursor trigger-evaluation process timed out after {timeout}s"
+                ) from exc
+            if process.returncode != 0:
+                detail = stderr.decode("utf-8", errors="replace").strip()
+                raise RuntimeError(
+                    f"cursor trigger-evaluation process exited {process.returncode}: "
+                    f"{detail or 'no diagnostic output'}"
+                )
+            output = stdout.decode("utf-8", errors="replace")
+            for line in output.splitlines():
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if cursor_event_triggers_skill(event, clean_name):
+                    return True
+            return False
 
         triggered = False
         start_time = time.time()
@@ -125,7 +242,7 @@ def run_single_query(
                     except json.JSONDecodeError:
                         continue
 
-                    # Early detection via stream events
+                    # Claude: early detection via stream events.
                     if event.get("type") == "stream_event":
                         se = event.get("event", {})
                         se_type = se.get("type", "")
@@ -175,10 +292,28 @@ def run_single_query(
                 process.kill()
                 process.wait()
 
+        if process.returncode not in (None, 0):
+            raise RuntimeError(
+                f"{backend} trigger-evaluation process exited {process.returncode}"
+            )
         return triggered
     finally:
-        if command_file.exists():
-            command_file.unlink()
+        if backend == "cursor" and owns_candidate:
+            if candidate_dir.exists():
+                shutil.rmtree(candidate_dir)
+            # Remove only parent directories this invocation created.
+            removable_parents = []
+            if not skills_dir_existed:
+                removable_parents.append(candidate_dir.parent)
+            if not cursor_dir_existed:
+                removable_parents.append(candidate_dir.parent.parent)
+            for parent in removable_parents:
+                try:
+                    parent.rmdir()
+                except OSError:
+                    pass
+        elif backend != "cursor" and candidate_file.exists():
+            candidate_file.unlink()
 
 
 def run_eval(
@@ -191,47 +326,85 @@ def run_eval(
     runs_per_query: int = 1,
     trigger_threshold: float = 0.5,
     model: str | None = None,
+    backend: str = "auto",
 ) -> dict:
     """Run the full eval set and return results."""
-    results = []
+    backend = ensure_backend_ready(backend)
+    total_runs = len(eval_set) * runs_per_query
 
-    with ProcessPoolExecutor(max_workers=num_workers) as executor:
-        future_to_info = {}
-        for item in eval_set:
-            for run_idx in range(runs_per_query):
-                future = executor.submit(
-                    run_single_query,
-                    item["query"],
-                    skill_name,
-                    description,
-                    timeout,
-                    str(project_root),
-                    model,
-                )
-                future_to_info[future] = (item, run_idx)
-
+    def execute_batch(
+        workspace: Path,
+        shared_candidate_name: str | None,
+    ) -> tuple[dict[str, list[bool]], dict[str, dict], int]:
+        failed_runs = 0
         query_triggers: dict[str, list[bool]] = {}
         query_items: dict[str, dict] = {}
-        for future in as_completed(future_to_info):
-            item, _ = future_to_info[future]
-            query = item["query"]
-            query_items[query] = item
-            if query not in query_triggers:
-                query_triggers[query] = []
-            try:
-                query_triggers[query].append(future.result())
-            except Exception as e:
-                print(f"Warning: query failed: {e}", file=sys.stderr)
-                query_triggers[query].append(False)
+        with ProcessPoolExecutor(max_workers=num_workers) as executor:
+            future_to_info = {}
+            for item in eval_set:
+                for run_idx in range(runs_per_query):
+                    future = executor.submit(
+                        run_single_query,
+                        item["query"],
+                        skill_name,
+                        description,
+                        timeout,
+                        str(workspace),
+                        model,
+                        backend,
+                        shared_candidate_name,
+                    )
+                    future_to_info[future] = (item, run_idx)
 
+            for future in as_completed(future_to_info):
+                item, _ = future_to_info[future]
+                query = item["query"]
+                query_items[query] = item
+                query_triggers.setdefault(query, [])
+                try:
+                    query_triggers[query].append(future.result())
+                except Exception as e:
+                    print(f"Warning: query failed: {e}", file=sys.stderr)
+                    query_triggers[query].append(False)
+                    failed_runs += 1
+        return query_triggers, query_items, failed_runs
+
+    if backend == "cursor":
+        # All parallel runs must see exactly one candidate. An isolated shared
+        # workspace prevents UUID races and keeps the user's project untouched.
+        with tempfile.TemporaryDirectory(prefix="skill-trigger-eval-") as temp_dir:
+            workspace = Path(temp_dir)
+            _mirror_cursor_discovery_context(
+                project_root, workspace, skill_name
+            )
+            shared_candidate_name = _candidate_name(skill_name)
+            _write_cursor_candidate(
+                workspace, shared_candidate_name, skill_name, description
+            )
+            query_triggers, query_items, failed_runs = execute_batch(
+                workspace, shared_candidate_name
+            )
+    else:
+        query_triggers, query_items, failed_runs = execute_batch(
+            project_root, None
+        )
+
+    if failed_runs:
+        raise RuntimeError(
+            f"{failed_runs} of {total_runs} {backend} trigger-evaluation runs failed; "
+            "refusing to treat infrastructure failures as non-triggers."
+        )
+
+    results = []
     for query, triggers in query_triggers.items():
         item = query_items[query]
         trigger_rate = sum(triggers) / len(triggers)
         should_trigger = item["should_trigger"]
-        if should_trigger:
-            did_pass = trigger_rate >= trigger_threshold
-        else:
-            did_pass = trigger_rate < trigger_threshold
+        did_pass = (
+            trigger_rate >= trigger_threshold
+            if should_trigger
+            else trigger_rate < trigger_threshold
+        )
         results.append({
             "query": query,
             "should_trigger": should_trigger,
@@ -247,6 +420,7 @@ def run_eval(
     return {
         "skill_name": skill_name,
         "description": description,
+        "backend": backend,
         "results": results,
         "summary": {
             "total": total,
@@ -265,7 +439,13 @@ def main():
     parser.add_argument("--timeout", type=int, default=30, help="Timeout per query in seconds")
     parser.add_argument("--runs-per-query", type=int, default=3, help="Number of runs per query")
     parser.add_argument("--trigger-threshold", type=float, default=0.5, help="Trigger rate threshold")
-    parser.add_argument("--model", default=None, help="Model to use for claude -p (default: user's configured model)")
+    parser.add_argument("--model", default=None, help="Model to use (default: selected CLI's configured model)")
+    parser.add_argument(
+        "--backend",
+        choices=SUPPORTED_BACKENDS,
+        default="auto",
+        help="Agent CLI used for trigger tests (default: auto)",
+    )
     parser.add_argument("--verbose", action="store_true", help="Print progress to stderr")
     args = parser.parse_args()
 
@@ -278,7 +458,8 @@ def main():
 
     name, original_description, content = parse_skill_md(skill_path)
     description = args.description or original_description
-    project_root = find_project_root()
+    backend = resolve_backend(args.backend)
+    project_root = find_project_root(backend)
 
     if args.verbose:
         print(f"Evaluating: {description}", file=sys.stderr)
@@ -293,6 +474,7 @@ def main():
         runs_per_query=args.runs_per_query,
         trigger_threshold=args.trigger_threshold,
         model=args.model,
+        backend=backend,
     )
 
     if args.verbose:
