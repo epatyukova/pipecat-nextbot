@@ -44,4 +44,6 @@ The starter scenario uses a local Ollama judge by default (`gemma4:12b`). To use
 
 ## Next steps
 
-Implement restaurant behaviour using synthetic data and fake integrations. Before enabling any live bookings, messages, or transfers, confirm the telephony and reservation systems, staff fallback, and pilot release checks in the [agent architecture](docs/architecture/restaurant-receptionist.md). Do not put real caller data in fixtures or eval logs.
+Start with the read-only restaurant FAQ. [`server/data/west_kirby_kitchen.demo.json`](server/data/west_kirby_kitchen.demo.json) is a local demo snapshot of the restaurant's public info page. The scaffold does not load it yet. It records published opening times, not last kitchen orders. Friday and Saturday dinner is listed as open “until late”; do not infer a closing time. The fixture does not supply holiday hours, parking, accessibility, takeaway, or allergen information. Treat missing facts as unknown. The public email and booking link are reference information, not integration targets.
+
+Wire the FAQ lookup, then add text scenarios for Wednesday closure, Friday dinner hours, and an unknown fact. Use separate synthetic fixtures for booking rules and fake integrations. Before taking live calls or enabling bookings, messages, or transfers, confirm the restaurant information with the owner and follow the pilot release checks in the [agent architecture](docs/architecture/restaurant-receptionist.md). Do not put real caller data in fixtures or eval logs.

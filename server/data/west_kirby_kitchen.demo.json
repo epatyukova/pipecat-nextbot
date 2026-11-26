@@ -1,0 +1,26 @@
+{
+  "usage": "local_demo_only",
+  "source_url": "https://www.westkirbykitchen.com/info",
+  "name": "West Kirby Kitchen",
+  "timezone": "Europe/London",
+  "address": "22 Banks Road, West Kirby, Wirral, CH48 0RD",
+  "public_enquiries_email": "westkirbykitchen@hotmail.com",
+  "links": {
+    "menu": "https://www.westkirbykitchen.com/menu",
+    "bookings": "https://www.westkirbykitchen.com/bookings"
+  },
+  "published_opening_times": {
+    "closed_days": ["wednesday"],
+    "breakfast_and_lunch": {
+      "days": ["monday", "tuesday", "thursday", "friday", "saturday", "sunday"],
+      "opens_at": "09:00",
+      "closes_at": "17:00"
+    },
+    "evening_dinner": {
+      "days": ["friday", "saturday"],
+      "opens_at": "17:00",
+      "closes_at": null,
+      "published_closing_text": "until late"
+    }
+  }
+}
